@@ -26,7 +26,19 @@
       "Bash(python -c:*)",
       "Bash(jq:*)",
       "Bash(git remote:*)",
-      "Skill(commit-commands:commit)"
+      "Skill(commit-commands:commit)",
+      "Bash(wc:*)",
+      "Read(//Users/danblanchard/.claude/scripts/**)",
+      "Read(//Users/danblanchard/.claude/**)",
+      "Read(//Users/danblanchard/**)",
+      "Bash(gh issue:*)",
+      "Bash(mkdir -p /tmp/mtga_wip)",
+      "Bash(cp /Users/danblanchard/repos/mtga-reader/NOTES.md /tmp/mtga_wip/NOTES_final.md)",
+      "Bash(cp /Users/danblanchard/repos/mtga-reader/src/napi/mod.rs /tmp/mtga_wip/mod.rs_final)",
+      "Bash(cp /Users/danblanchard/repos/mtga-reader/index.d.ts /tmp/mtga_wip/index.d.ts_final)",
+      "Bash(cp /Users/danblanchard/repos/mtga-reader/index.js /tmp/mtga_wip/index.js_final)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)"
     ]
   }
 }
