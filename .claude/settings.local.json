@@ -24,7 +24,9 @@
       "Bash(npx napi build:*)",
       "Bash(grep:*)",
       "Bash(python -c:*)",
-      "Bash(jq:*)"
+      "Bash(jq:*)",
+      "Bash(git remote:*)",
+      "Skill(commit-commands:commit)"
     ]
   }
 }
