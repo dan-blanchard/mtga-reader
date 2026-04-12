@@ -4680,6 +4680,64 @@ pub fn read_mtga_card_database(process_name: String) -> serde_json::Value {
     }
 }
 
+/// Mono-backend card-collection reader. Targets Arena processes running
+/// the Mono scripting backend (Windows native or Wine). Pass the process
+/// name or path fragment (e.g. "MTGA.exe" for Wine).
+#[napi]
+pub fn read_mtga_cards_mono(process_name: String) -> serde_json::Value {
+    match crate::mono::scanner::read_mtga_cards_mono(&process_name) {
+        Ok(entries) => {
+            let cards: Vec<serde_json::Value> = entries
+                .into_iter()
+                .map(|(key, value)| serde_json::json!({ "cardId": key, "quantity": value }))
+                .collect();
+            serde_json::json!({ "cards": cards })
+        }
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Mono-backend card-database reader.
+#[napi]
+pub fn read_mtga_card_database_mono(process_name: String) -> serde_json::Value {
+    match crate::mono::scanner::read_mtga_card_database_mono(&process_name) {
+        Ok(entries) => {
+            let cards: Vec<serde_json::Value> = entries
+                .into_iter()
+                .map(|(grp_id, set, num, title_id)| {
+                    serde_json::json!({
+                        "grpId": grp_id,
+                        "set": set,
+                        "collectorNumber": num,
+                        "titleId": title_id,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "cards": cards })
+        }
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Mono-backend inventory reader.
+#[napi]
+pub fn read_mtga_inventory_mono(process_name: String) -> serde_json::Value {
+    match crate::mono::scanner::read_mtga_inventory_mono(&process_name) {
+        Ok((wc, wu, wr, wm, gold, gems, vault)) => {
+            serde_json::json!({
+                "wcCommon": wc,
+                "wcUncommon": wu,
+                "wcRare": wr,
+                "wcMythic": wm,
+                "gold": gold,
+                "gems": gems,
+                "vaultProgress": vault,
+            })
+        }
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
 #[napi]
 pub fn read_class(process_name: String, address: i64) -> serde_json::Value {
     #[cfg(target_os = "windows")]

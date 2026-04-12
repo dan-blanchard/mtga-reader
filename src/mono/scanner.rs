@@ -6,9 +6,130 @@
 //! the same Unity 2022.3.62f2 source — only runtime-metadata access
 //! patterns differ.
 
+#[cfg(not(target_os = "macos"))]
 use crate::mono_reader::MonoReader;
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
+
+// ──────────────────────────────────────────────────────────────────
+// Cross-platform memory reader wrapper
+// ──────────────────────────────────────────────────────────────────
+//
+// On macOS, Wine/CrossOver processes require direct mach task_for_pid
+// via the mach2 crate (the `process_memory` crate used by MonoReader
+// fails with KERN_FAILURE on these processes). On other platforms,
+// MonoReader works fine.
+
+#[cfg(target_os = "macos")]
+pub struct MemReader {
+    inner: crate::il2cpp::macos_memory::MacOsMemoryReader,
+}
+
+#[cfg(not(target_os = "macos"))]
+pub struct MemReader {
+    inner: MonoReader,
+}
+
+#[cfg(target_os = "macos")]
+impl MemReader {
+    pub fn new(pid: u32) -> Result<Self, String> {
+        let inner = crate::il2cpp::macos_memory::MacOsMemoryReader::new(pid)
+            .map_err(|e| format!("Failed to attach to process {}: {}", pid, e))?;
+        Ok(MemReader { inner })
+    }
+
+    pub fn read_ptr(&self, addr: usize) -> usize {
+        self.inner.read_ptr(addr)
+    }
+
+    pub fn read_i32(&self, addr: usize) -> i32 {
+        self.inner.read_i32(addr)
+    }
+
+    pub fn read_u32(&self, addr: usize) -> u32 {
+        self.inner.read_u32(addr)
+    }
+
+    pub fn read_u16(&self, addr: usize) -> u16 {
+        self.inner.read_u16(addr)
+    }
+
+    pub fn read_bytes(&self, addr: usize, len: usize) -> Vec<u8> {
+        self.inner.read_bytes(addr, len)
+    }
+
+    pub fn read_ascii_string(&self, addr: usize) -> String {
+        self.inner.read_ascii_string(addr).unwrap_or_default()
+    }
+
+    pub fn read_f64(&self, addr: usize) -> f64 {
+        let bytes = self.inner.read_bytes(addr, 8);
+        if bytes.len() == 8 {
+            f64::from_le_bytes(bytes.try_into().unwrap())
+        } else {
+            0.0
+        }
+    }
+
+    pub fn read_mono_string(&self, string_ptr: usize) -> Option<String> {
+        if string_ptr == 0 || string_ptr < 0x10000 {
+            return None;
+        }
+        // MonoString: vtable(8) + monitor(8) + length(4) + chars...
+        // SIZE_OF_PTR is 8 on x64
+        const SIZE_OF_PTR: usize = 8;
+        let length = self.inner.read_u32(string_ptr + SIZE_OF_PTR * 2);
+        if length == 0 || length > 10000 {
+            return None;
+        }
+        let chars_offset = string_ptr + SIZE_OF_PTR * 2 + 4;
+        let mut utf16_chars = Vec::new();
+        for i in 0..length {
+            let char_val = self.inner.read_u16(chars_offset + (i as usize * 2));
+            utf16_chars.push(char_val);
+        }
+        String::from_utf16(&utf16_chars).ok()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl MemReader {
+    pub fn new(pid: u32) -> Result<Self, String> {
+        Ok(MemReader { inner: MonoReader::new(pid) })
+    }
+
+    pub fn read_ptr(&self, addr: usize) -> usize {
+        self.inner.read_ptr(addr)
+    }
+
+    pub fn read_i32(&self, addr: usize) -> i32 {
+        self.inner.read_i32(addr)
+    }
+
+    pub fn read_u32(&self, addr: usize) -> u32 {
+        self.inner.read_u32(addr)
+    }
+
+    pub fn read_u16(&self, addr: usize) -> u16 {
+        self.inner.read_u16(addr)
+    }
+
+    pub fn read_bytes(&self, addr: usize, len: usize) -> Vec<u8> {
+        self.inner.read_bytes(addr, len)
+    }
+
+    pub fn read_ascii_string(&self, addr: usize) -> String {
+        self.inner.read_ascii_string(addr)
+    }
+
+    pub fn read_f64(&self, addr: usize) -> f64 {
+        self.inner.read_f64(addr)
+    }
+
+    pub fn read_mono_string(&self, string_ptr: usize) -> Option<String> {
+        self.inner.read_mono_string(string_ptr)
+    }
+}
 
 /// Pointer plausibility bounds. Wine on macOS maps the Windows process's
 /// virtual memory into the low half of 64-bit address space. We accept
@@ -36,7 +157,7 @@ mod mono_class_offsets {
 /// Read a Mono class's name from its MonoClass pointer.
 /// On Mono, an object's class is at `read_ptr(read_ptr(obj))` (obj →
 /// MonoVTable → MonoClass). The caller passes the MonoClass pointer.
-pub fn read_mono_class_name(reader: &MonoReader, class_ptr: usize) -> String {
+pub fn read_mono_class_name(reader: &MemReader, class_ptr: usize) -> String {
     if class_ptr < MIN_PTR || class_ptr > MAX_PTR {
         return String::new();
     }
@@ -49,7 +170,7 @@ pub fn read_mono_class_name(reader: &MonoReader, class_ptr: usize) -> String {
 
 /// Resolve MonoClass from an object address via Mono's vtable indirection.
 /// `obj[+0x00]` is a `MonoVTable*`; `vtable[+0x00]` is the `MonoClass*`.
-pub fn obj_to_mono_class(reader: &MonoReader, obj: usize) -> usize {
+pub fn obj_to_mono_class(reader: &MemReader, obj: usize) -> usize {
     let vtable = reader.read_ptr(obj);
     if vtable < MIN_PTR || vtable > MAX_PTR {
         return 0;
@@ -85,7 +206,7 @@ pub struct MonoFieldInfo {
 ///
 /// **If the first run produces garbage field names**, adjust the
 /// `NAME_OFF` and `OFFSET_OFF` constants below and re-run.
-pub fn mono_get_class_fields(reader: &MonoReader, class_ptr: usize) -> Vec<MonoFieldInfo> {
+pub fn mono_get_class_fields(reader: &MemReader, class_ptr: usize) -> Vec<MonoFieldInfo> {
     const STRIDE: usize = 0x20;
     const NAME_OFF: usize = 0x08;   // Offset of name_ptr within MonoClassField
     const OFFSET_OFF: usize = 0x18; // Offset of field_offset (i32) within MonoClassField
@@ -230,7 +351,7 @@ pub fn find_scannable_heap_regions(pid: u32) -> Vec<(usize, usize)> {
 /// Scan heap for a Dictionary<int, int> matching the card-collection
 /// signature. Identical to the IL2CPP version — no class metadata
 /// involved; pure data-shape invariant.
-pub fn scan_heap_for_cards_dictionary(reader: &MonoReader, pid: u32) -> usize {
+pub fn scan_heap_for_cards_dictionary(reader: &MemReader, pid: u32) -> usize {
     const MIN_COUNT: i32 = 500;
     const MAX_COUNT: i32 = 50_000;
     const MIN_CARD_ID: i32 = 1;
@@ -326,7 +447,7 @@ pub fn scan_heap_for_cards_dictionary(reader: &MonoReader, pid: u32) -> usize {
 }
 
 /// Read card entries from a Dictionary<int, int> at the given address.
-pub fn read_cards_dictionary_entries(reader: &MonoReader, dict_addr: usize) -> Vec<(i32, i32)> {
+pub fn read_cards_dictionary_entries(reader: &MemReader, dict_addr: usize) -> Vec<(i32, i32)> {
     const MIN_CARD_ID: i32 = 1;
     const MAX_CARD_ID: i32 = 200_000;
     const MIN_QUANTITY: i32 = 1;
@@ -358,7 +479,7 @@ pub fn read_cards_dictionary_entries(reader: &MonoReader, dict_addr: usize) -> V
 /// Public entry point: read the card collection from a Mono-based Arena process.
 pub fn read_mtga_cards_mono(process_name: &str) -> Result<Vec<(i32, i32)>, String> {
     let pid = find_wine_pid(process_name)?;
-    let reader = MonoReader::new(pid);
+    let reader = MemReader::new(pid)?;
 
     let dict_addr = scan_heap_for_cards_dictionary(&reader, pid);
     if dict_addr == 0 {
@@ -387,7 +508,7 @@ pub fn read_mtga_cards_mono(process_name: &str) -> Result<Vec<(i32, i32)>, Strin
 /// entries. Two-pass: filter by hash==key + count range, then verify
 /// entry value class names via Mono vtable indirection.
 pub fn scan_heap_for_card_printing_dictionary(
-    reader: &MonoReader,
+    reader: &MemReader,
     pid: u32,
 ) -> Option<(usize, i32, usize)> {
     // Returns (dict_addr, count, runtime_value_class_ptr)
@@ -518,7 +639,7 @@ pub fn scan_heap_for_card_printing_dictionary(
 
 /// Walk a Dictionary<int, CardPrintingData*> with stride-24 entries.
 pub fn read_card_printing_entries(
-    reader: &MonoReader,
+    reader: &MemReader,
     dict_addr: usize,
     value_class: usize,
 ) -> Vec<(i32, usize)> {
@@ -565,7 +686,7 @@ pub struct CardFieldOffsets {
 }
 
 pub fn resolve_card_field_offsets(
-    reader: &MonoReader,
+    reader: &MemReader,
     runtime_value_class: usize,
     cpr_class_hint: usize,
 ) -> Option<CardFieldOffsets> {
@@ -622,7 +743,7 @@ pub fn read_mtga_card_database_mono(
     process_name: &str,
 ) -> Result<Vec<(i32, String, String, i32)>, String> {
     let pid = find_wine_pid(process_name)?;
-    let reader = MonoReader::new(pid);
+    let reader = MemReader::new(pid)?;
     let debug = std::env::var("MTGA_DEBUG_MONO").is_ok();
 
     // We need a CardPrintingRecord class pointer for field-offset
@@ -733,7 +854,7 @@ fn inventory_score(wc: i32, wu: i32, wr: i32, wm: i32, g: i32, ge: i32) -> i64 {
 /// the plausibility filter, resolve obj → vtable → class → name,
 /// caching per unique class pointer.
 pub fn scan_heap_for_client_player_inventory(
-    reader: &MonoReader,
+    reader: &MemReader,
     pid: u32,
     offsets: &InventoryFieldOffsets,
 ) -> Option<usize> {
@@ -832,7 +953,7 @@ pub fn read_mtga_inventory_mono(
     process_name: &str,
 ) -> Result<(i32, i32, i32, i32, i32, i32, f64), String> {
     let pid = find_wine_pid(process_name)?;
-    let reader = MonoReader::new(pid);
+    let reader = MemReader::new(pid)?;
     let debug = std::env::var("MTGA_DEBUG_MONO").is_ok();
 
     // Resolve field offsets. We need to find a ClientPlayerInventory class

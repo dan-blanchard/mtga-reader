@@ -111,5 +111,15 @@ export declare function readMtgaInventory(processName: string): any
  * table using `titleId` for a fully offline name lookup.
  */
 export declare function readMtgaCardDatabase(processName: string): any
+/**
+ * Mono-backend card-collection reader. Targets Arena processes running
+ * the Mono scripting backend (Windows native or Wine). Pass the process
+ * name or path fragment (e.g. "MTGA.exe" for Wine).
+ */
+export declare function readMtgaCardsMono(processName: string): any
+/** Mono-backend card-database reader. */
+export declare function readMtgaCardDatabaseMono(processName: string): any
+/** Mono-backend inventory reader. */
+export declare function readMtgaInventoryMono(processName: string): any
 export declare function readClass(processName: string, address: number): any
 export declare function readGenericInstance(processName: string, address: number): any
