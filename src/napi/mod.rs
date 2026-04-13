@@ -4740,6 +4740,32 @@ pub fn read_mtga_inventory_mono(process_name: String, known_gold: i32, known_gem
     }
 }
 
+/// Debug: probe a MonoClass struct to find the name field offset.
+#[napi]
+pub fn probe_mono_class(process_name: String, class_address: String) -> serde_json::Value {
+    let addr = u64::from_str_radix(class_address.trim_start_matches("0x"), 16)
+        .unwrap_or(0) as usize;
+    match crate::mono::scanner::probe_mono_class_name_offset(&process_name, addr) {
+        Ok(result) => serde_json::json!({ "result": result }),
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Debug: read raw bytes from a Mono Arena process at a given address.
+/// Returns hex string. Used for discovering Mono struct layouts.
+#[napi]
+pub fn read_mono_bytes(process_name: String, address: String, length: i32) -> serde_json::Value {
+    let addr = u64::from_str_radix(address.trim_start_matches("0x"), 16)
+        .unwrap_or(0) as usize;
+    if addr == 0 || length <= 0 {
+        return serde_json::json!({ "error": "invalid address or length" });
+    }
+    match crate::mono::scanner::read_bytes_at(&process_name, addr, length as usize) {
+        Ok(hex) => serde_json::json!({ "hex": hex }),
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
 /// Debug probe: search heap for two adjacent i32 values and dump context.
 /// Use to discover field offsets on Mono.
 /// Example: probeHeapForI32Pair("MTGA.exe", 1825, 610) finds gold+gems.

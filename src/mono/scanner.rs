@@ -233,9 +233,11 @@ const INV_GOLD: usize = MONO_OBJ_HEADER + 16;        // 0x18
 const INV_GEMS: usize = MONO_OBJ_HEADER + 20;        // 0x1C
 const INV_VAULT: usize = MONO_OBJ_HEADER + 32;       // 0x28
 
-/// MonoClass struct offsets from `src/mono/offsets.rs::unity_2022_3()`.
-/// Inlined here for clarity; if Arena changes Unity version, update
-/// these from the offsets module.
+/// MonoClass struct offsets verified on Windows Arena Unity 2022.3.62f2:
+/// - name at +0x48 → "ClientPlayerInventory"
+/// - namespace at +0x50 → "Wizards.Mtga.Inventory"
+/// Confirmed by probing the template ClientPlayerInventory's MonoClass
+/// at 0x211f37f2470 on a live Windows Arena process (2026-04-12).
 mod mono_class_offsets {
     /// MonoClass.name — pointer to ASCII class name string
     pub const NAME: usize = 0x48;
@@ -1192,23 +1194,21 @@ pub fn scan_heap_for_client_player_inventory(
                 continue;
             }
             let vault = f64::from_le_bytes(buf[vault_off..vault_off+8].try_into().unwrap_or([0;8]));
-            // Vault progress is a percentage like 58.9, always with
-            // at most 1 decimal place (Arena increments in ~0.1%
-            // steps). Require it to be:
-            //  1. In [0.1, 100.0]
-            //  2. "Round" to 1 decimal place — i.e., vault*10 is
-            //     very close to an integer. Random float64s in
-            //     [0.1, 100] almost never satisfy this.
+            // Vault progress constraints (combined eliminate nearly all
+            // false positives):
+            // 1. Range [5.0, 100.0] — excludes common false-positive
+            //    floats like 1.0, 2.0, 3.0. Active players who've
+            //    accumulated enough cards for meaningful inventory
+            //    reading always have vault > 5%.
+            // 2. "Round" to 1 decimal place — vault*10 must be very
+            //    close to an integer (error < 1e-10). Real vault
+            //    percentages from C# have IEEE 754 error ~1e-13.
+            //    Random bytes rarely have this property.
             //
-            // Players with vault=0.0 need a separate fallback path.
-            // Real vault percentages are exact multiples of 0.1 assigned
-            // from C# double arithmetic. Their f64 representation error
-            // when multiplied by 10 is ~1e-13 (inherent IEEE 754 error
-            // for decimal fractions). Random heap bytes that coincidentally
-            // decode as floats in [0.1, 100] have errors 1e-6 to 1e-1.
-            // Threshold 1e-10 separates them with enormous margin.
+            // Players with vault < 5% can use the anchor mode
+            // (pass known gold+gems values) instead.
             let vault_round = (vault * 10.0 - (vault * 10.0).round()).abs() < 1e-10;
-            if !(vault >= 0.1 && vault <= 100.0 && vault_round) {
+            if !(vault >= 5.0 && vault <= 100.0 && vault_round) {
                 i += 4;
                 continue;
             }
@@ -1324,6 +1324,70 @@ pub fn read_mtga_inventory_mono(
         }
     }
     Ok((wc_common, wc_uncommon, wc_rare, wc_mythic, gold, gems, vault_progress))
+}
+
+/// Probe: dump a MonoClass struct and try to find the name field.
+/// Reads 256 bytes from the given class address, treats every 8-byte
+/// offset as a potential pointer, dereferences it, and checks if it
+/// gives a valid ASCII identifier string. Returns all matches.
+pub fn probe_mono_class_name_offset(
+    process_name: &str,
+    class_addr: usize,
+) -> Result<String, String> {
+    let pid = find_wine_pid(process_name)?;
+    let reader = MemReader::new(pid)?;
+    let class_bytes = reader.read_bytes(class_addr, 256);
+    let mut results = Vec::new();
+    for off in (0..248).step_by(4) {
+        // Try both 8-byte and 4-byte aligned pointers
+        if off + 8 > class_bytes.len() { break; }
+        let ptr = u64::from_le_bytes(
+            class_bytes[off..off+8].try_into().unwrap_or([0;8]),
+        ) as usize;
+        if ptr < MIN_PTR || ptr > MAX_PTR { continue; }
+        // Try reading as ASCII string
+        let str_bytes = reader.read_bytes(ptr, 64);
+        let mut s = String::new();
+        for &b in &str_bytes {
+            if b == 0 { break; }
+            if b >= 32 && b < 127 {
+                s.push(b as char);
+            } else {
+                s.clear();
+                break;
+            }
+        }
+        if s.len() >= 3 && s.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_' || c == '<') {
+            results.push(format!("+0x{:02x}: ptr=0x{:x} -> {:?}", off, ptr, s));
+        }
+    }
+    Ok(results.join("\n"))
+}
+
+/// Read raw bytes at an arbitrary address in the target process.
+pub fn read_bytes_at(process_name: &str, addr: usize, len: usize) -> Result<String, String> {
+    let pid = find_wine_pid(process_name)?;
+    let reader = MemReader::new(pid)?;
+    let bytes = reader.read_bytes(addr, len);
+    let hex_lines: Vec<String> = bytes.chunks(16).enumerate().map(|(i, chunk)| {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
+        let mut i32s = Vec::new();
+        for j in (0..chunk.len()).step_by(4) {
+            if j + 4 <= chunk.len() {
+                let v = i32::from_le_bytes([chunk[j], chunk[j+1], chunk[j+2], chunk[j+3]]);
+                i32s.push(format!("{}", v));
+            }
+        }
+        let mut ptrs = Vec::new();
+        for j in (0..chunk.len()).step_by(8) {
+            if j + 8 <= chunk.len() {
+                let p = u64::from_le_bytes(chunk[j..j+8].try_into().unwrap());
+                ptrs.push(format!("0x{:x}", p));
+            }
+        }
+        format!("+{:03x}: {}  i32=[{}]  ptr=[{}]", i * 16, hex.join(" "), i32s.join(","), ptrs.join(","))
+    }).collect();
+    Ok(hex_lines.join("\n"))
 }
 
 // ──────────────────────────────────────────────────────────────────
