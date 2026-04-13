@@ -26,11 +26,10 @@ function findCardDatabasePath(arenaPath) {
   const candidates = [];
 
   if (arenaPath) {
+    // Explicit path: only check there, no platform fallbacks
     candidates.push(path.join(arenaPath, "MTGA_Data", "Downloads", "Raw"));
     candidates.push(path.join(arenaPath, "Downloads", "Raw"));
-  }
-
-  if (process.platform === "darwin") {
+  } else if (process.platform === "darwin") {
     // macOS: Unity stores downloads in ~/Library/Application Support/
     const home = process.env.HOME || "/Users/" + process.env.USER;
     candidates.push(
