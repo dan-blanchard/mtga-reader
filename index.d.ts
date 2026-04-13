@@ -81,5 +81,47 @@ export declare function readData(processName: string, fields: Array<string>): an
  * objects on success, or `{ "error": string }` on any failure.
  */
 export declare function readMtgaCards(processName: string): any
+/**
+ * Inventory reader. Returns the current player's wildcard counts
+ * plus currency and vault progress, read directly from the
+ * `ClientPlayerInventory` singleton in Arena's memory.
+ *
+ * Returns `{ wcCommon, wcUncommon, wcRare, wcMythic, gold, gems,
+ * vaultProgress }` on success, `{ error }` on failure.
+ *
+ * `vaultProgress` is a number in `0.0 – 100.0` matching Arena's UI
+ * exactly (e.g. `58.9` when the UI shows "Vault: 58.9%"). The raw
+ * field is stored as an 8-byte `double` in the C# class, not an
+ * int — NOTES / IL2CPP_RESEARCH_SUMMARY.md were wrong about this.
+ *
+ * Set `MTGA_DEBUG_INVENTORY=1` for verbose stderr diagnostics (class
+ * location, field dump, candidate counts).
+ */
+export declare function readMtgaInventory(processName: string): any
+/**
+ * Mono-backend card-collection reader. Targets Arena processes running
+ * the Mono scripting backend (Windows native or Wine). Pass the process
+ * name or path fragment (e.g. "MTGA.exe" for Wine).
+ */
+export declare function readMtgaCardsMono(processName: string): any
+/**
+ * Mono-backend inventory reader.
+ * Pass known_gold and known_gems (visible in Arena's UI) for exact
+ * anchoring. Pass 0 for both to use the generic scanner (less reliable).
+ */
+export declare function readMtgaInventoryMono(processName: string, knownGold: number, knownGems: number): any
+/** Debug: probe a MonoClass struct to find the name field offset. */
+export declare function probeMonoClass(processName: string, classAddress: string): any
+/**
+ * Debug: read raw bytes from a Mono Arena process at a given address.
+ * Returns hex string. Used for discovering Mono struct layouts.
+ */
+export declare function readMonoBytes(processName: string, address: string, length: number): any
+/**
+ * Debug probe: search heap for two adjacent i32 values and dump context.
+ * Use to discover field offsets on Mono.
+ * Example: probeHeapForI32Pair("MTGA.exe", 1825, 610) finds gold+gems.
+ */
+export declare function probeHeapForI32Pair(processName: string, valA: number, valB: number): any
 export declare function readClass(processName: string, address: number): any
 export declare function readGenericInstance(processName: string, address: number): any
