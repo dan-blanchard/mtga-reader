@@ -744,30 +744,32 @@ pub fn read_mtga_cards_mono(process_name: &str) -> Result<Vec<(i32, i32)>, Strin
 // readMtgaCardDatabase — scan for Dictionary<int, CardPrintingData*>
 // ──────────────────────────────────────────────────────────────────
 
-/// Scan heap for a Dictionary<int, CardPrintingData*> with stride-24
-/// entries. Two-pass: filter by hash==key + count range, then verify
-/// entry value class names via Mono vtable indirection.
+/// Scan heap for the card-printing Entry[] array directly.
+/// Same approach as `scan_heap_for_cards_dictionary` but at stride 24
+/// (pointer-valued entries: hash(4) + next(4) + key(4) + pad(4) +
+/// value_ptr(8) = 24 bytes).
+///
+/// Returns (first_entry_addr, run_length) or None.
 pub fn scan_heap_for_card_printing_dictionary(
     reader: &MemReader,
     pid: u32,
-) -> Option<(usize, i32, usize)> {
-    // Returns (dict_addr, count, runtime_value_class_ptr)
-    const MIN_COUNT: i32 = 5_000;
-    const MAX_COUNT: i32 = 100_000;
-    const SAMPLE_ENTRIES: usize = 30;
-    const MIN_HASH_KEY_MATCHES: usize = 10;
+) -> Option<(usize, usize)> {
+    const MIN_CARD_ID: i32 = 5_000;
+    const MAX_CARD_ID: i32 = 200_000;
+    const ENTRY_STRIDE: usize = 24;
+    const MIN_CONSECUTIVE: usize = 50;
 
     let debug = std::env::var("MTGA_DEBUG_MONO").is_ok();
     let heap_regions = find_scannable_heap_regions(pid);
     if debug {
         eprintln!(
-            "mono::scan_heap_for_card_printing_dictionary: scanning {} regions",
-            heap_regions.len(),
+            "mono::scan_heap_for_card_printing_dictionary: scanning {} regions (stride {})",
+            heap_regions.len(), ENTRY_STRIDE,
         );
     }
 
-    // (dict_addr, count, hash_key_matches, first_value_class_ptr)
-    let mut candidates: Vec<(usize, i32, usize, usize)> = Vec::new();
+    let mut best_run_start: usize = 0;
+    let mut best_run_len: usize = 0;
 
     for (start, end) in heap_regions {
         let size = end - start;
@@ -775,142 +777,126 @@ pub fn scan_heap_for_card_printing_dictionary(
         if buf.len() != size {
             continue;
         }
-        let slot_count = size / 8;
-        let mut i = 0;
-        while i + 5 < slot_count {
-            let base = i * 8;
-            if base + DICT_COUNT + 4 > buf.len() {
+        let max_entries = buf.len() / ENTRY_STRIDE;
+        let mut run_start: usize = 0;
+        let mut run_len: usize = 0;
+        for entry_idx in 0..max_entries {
+            let off = entry_idx * ENTRY_STRIDE;
+            if off + ENTRY_STRIDE > buf.len() {
                 break;
             }
-            let buckets_ptr = u64::from_le_bytes(
-                buf[base + DICT_BUCKETS..base + DICT_BUCKETS + 8].try_into().unwrap_or([0; 8]),
+            let hash = i32::from_le_bytes(buf[off..off+4].try_into().unwrap_or([0; 4]));
+            let key = i32::from_le_bytes(buf[off+8..off+12].try_into().unwrap_or([0; 4]));
+            // value_ptr at off+16 (8 bytes) — just check it's non-null
+            let value_ptr = u64::from_le_bytes(
+                buf[off+16..off+24].try_into().unwrap_or([0; 8]),
             ) as usize;
-            let entries_ptr = u64::from_le_bytes(
-                buf[base + DICT_ENTRIES..base + DICT_ENTRIES + 8].try_into().unwrap_or([0; 8]),
-            ) as usize;
-            let count = i32::from_le_bytes(
-                buf[base + DICT_COUNT..base + DICT_COUNT + 4].try_into().unwrap_or([0; 4]),
-            );
-            if count < MIN_COUNT
-                || count > MAX_COUNT
-                || buckets_ptr < MIN_PTR
-                || buckets_ptr > MAX_PTR
-                || entries_ptr < MIN_PTR
-                || entries_ptr > MAX_PTR
-            {
-                i += 1;
-                continue;
-            }
 
-            let mut hash_key_matches = 0usize;
-            let mut first_value_class: usize = 0;
-            for entry_idx in 0..SAMPLE_ENTRIES {
-                let entry_addr = entries_ptr + ARRAY_HEADER + entry_idx * 24;
-                let entry_bytes = reader.read_bytes(entry_addr, 24);
-                if entry_bytes.len() != 24 {
-                    break;
+            let valid = hash >= 0
+                && hash == key
+                && key >= MIN_CARD_ID
+                && key <= MAX_CARD_ID
+                && value_ptr >= MIN_PTR
+                && value_ptr <= MAX_PTR;
+
+            if valid {
+                if run_len == 0 {
+                    run_start = start + off;
                 }
-                let hash = i32::from_le_bytes(entry_bytes[0..4].try_into().unwrap_or([0; 4]));
-                if hash == -1 {
-                    continue;
+                run_len += 1;
+            } else {
+                if run_len > best_run_len {
+                    best_run_start = run_start;
+                    best_run_len = run_len;
                 }
-                let key = i32::from_le_bytes(entry_bytes[8..12].try_into().unwrap_or([0; 4]));
-                if hash != key || key < 1 || key > 200_000 {
-                    continue;
-                }
-                hash_key_matches += 1;
-                if first_value_class == 0 {
-                    let value_ptr = u64::from_le_bytes(
-                        entry_bytes[16..24].try_into().unwrap_or([0; 8]),
-                    ) as usize;
-                    if value_ptr >= MIN_PTR && value_ptr <= MAX_PTR {
-                        // Mono vtable indirection: value → vtable → class
-                        let class = obj_to_mono_class(reader, value_ptr);
-                        if class >= MIN_PTR && class <= MAX_PTR {
-                            first_value_class = class;
-                        }
-                    }
-                }
+                run_len = 0;
             }
-            if hash_key_matches >= MIN_HASH_KEY_MATCHES && first_value_class != 0 {
-                candidates.push((start + base, count, hash_key_matches, first_value_class));
-            }
-            i += 1;
+        }
+        if run_len > best_run_len {
+            best_run_start = run_start;
+            best_run_len = run_len;
         }
     }
 
-    // Resolve class names and filter for card-printing classes
-    let accepted_names = ["CardPrintingData", "CardPrintingRecord"];
-    let mut name_cache: HashMap<usize, String> = HashMap::new();
-    for (_, _, _, class_ptr) in &candidates {
-        name_cache
-            .entry(*class_ptr)
-            .or_insert_with(|| read_mono_class_name(reader, *class_ptr));
-    }
     if debug {
         eprintln!(
-            "mono::scan_heap_for_card_printing_dictionary: {} candidates, {} unique value classes:",
-            candidates.len(),
-            name_cache.len(),
+            "mono::scan_heap_for_card_printing_dictionary: best run {} consecutive entries at 0x{:x}",
+            best_run_len, best_run_start,
         );
-        for (c, n) in &name_cache {
-            eprintln!("  0x{:x} -> {:?}", c, n);
-        }
     }
 
-    let cpr_classes: HashSet<usize> = name_cache
-        .iter()
-        .filter_map(|(c, n)| {
-            if accepted_names.iter().any(|a| *a == n.as_str()) {
-                Some(*c)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut winners: Vec<_> = candidates
-        .into_iter()
-        .filter(|(_, _, _, c)| cpr_classes.contains(c))
-        .collect();
-    winners.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| b.1.cmp(&a.1)));
-    winners.first().map(|(a, c, _, cl)| (*a, *c, *cl))
+    if best_run_len >= MIN_CONSECUTIVE {
+        Some((best_run_start, best_run_len))
+    } else {
+        None
+    }
 }
 
-/// Walk a Dictionary<int, CardPrintingData*> with stride-24 entries.
+/// Read card-printing entries from the found Entry[] run.
+/// Reads forward and backward from the first-entry address,
+/// extracting (grp_id, value_ptr) pairs.
 pub fn read_card_printing_entries(
     reader: &MemReader,
-    dict_addr: usize,
-    value_class: usize,
+    first_entry_addr: usize,
 ) -> Vec<(i32, usize)> {
-    let entries_ptr = reader.read_ptr(dict_addr + DICT_ENTRIES);
-    let count = reader.read_i32(dict_addr + DICT_COUNT);
-    if entries_ptr < MIN_PTR || count <= 0 {
-        return Vec::new();
+    const MIN_CARD_ID: i32 = 5_000;
+    const MAX_CARD_ID: i32 = 200_000;
+    const ENTRY_STRIDE: usize = 24;
+    const MAX_ENTRIES: usize = 100_000;
+    const MAX_GAP: usize = 500; // printing dict has more gaps than collection
+
+    let is_valid = |addr: usize| -> Option<(i32, usize)> {
+        let hash = reader.read_i32(addr);
+        if hash == -1 { return None; }
+        let key = reader.read_i32(addr + 8);
+        let value_ptr = reader.read_ptr(addr + 16);
+        if hash == key && key >= MIN_CARD_ID && key <= MAX_CARD_ID
+            && value_ptr >= MIN_PTR && value_ptr <= MAX_PTR
+        {
+            Some((key, value_ptr))
+        } else {
+            None
+        }
+    };
+
+    // Read backwards
+    let mut backwards: Vec<(i32, usize)> = Vec::new();
+    let mut gap = 0usize;
+    for i in 1..MAX_ENTRIES {
+        if let Some(addr) = first_entry_addr.checked_sub(i * ENTRY_STRIDE) {
+            if addr < MIN_PTR { break; }
+            let hash = reader.read_i32(addr);
+            if hash == -1 { gap += 1; if gap > MAX_GAP { break; } continue; }
+            if let Some(pair) = is_valid(addr) {
+                gap = 0;
+                backwards.push(pair);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
     }
-    let mut result = Vec::with_capacity(count as usize);
-    for i in 0..count.min(100_000) as usize {
-        let entry_addr = entries_ptr + ARRAY_HEADER + i * 24;
-        let hash = reader.read_i32(entry_addr);
-        if hash == -1 {
-            continue;
+    backwards.reverse();
+
+    // Read forward
+    let mut forward: Vec<(i32, usize)> = Vec::new();
+    gap = 0;
+    for i in 0..MAX_ENTRIES {
+        let addr = first_entry_addr + i * ENTRY_STRIDE;
+        let hash = reader.read_i32(addr);
+        if hash == -1 { gap += 1; if gap > MAX_GAP { break; } continue; }
+        if let Some(pair) = is_valid(addr) {
+            gap = 0;
+            forward.push(pair);
+        } else {
+            break;
         }
-        let key = reader.read_i32(entry_addr + 8);
-        if hash != key || key < 1 || key > 200_000 {
-            continue;
-        }
-        let value_ptr = reader.read_ptr(entry_addr + 16);
-        if value_ptr < MIN_PTR {
-            continue;
-        }
-        // Mono: obj → vtable → class
-        let obj_class = obj_to_mono_class(reader, value_ptr);
-        if obj_class != value_class {
-            continue;
-        }
-        result.push((key, value_ptr));
     }
-    result
+
+    let mut entries = backwards;
+    entries.extend(forward);
+    entries
 }
 
 /// Resolve field offsets for reading card-printing data.
@@ -992,24 +978,35 @@ pub fn read_mtga_card_database_mono(
     // resolve_card_field_offsets (hardcoded offsets from macOS).
     let cpr_class_hint = 0usize;
 
-    let (dict_addr, dict_count, runtime_value_class) =
+    let (first_entry_addr, run_len) =
         scan_heap_for_card_printing_dictionary(&reader, pid).ok_or_else(|| {
-            "Could not find card-printing dictionary in Arena's heap.".to_string()
+            "Could not find card-printing Entry[] in Arena's heap.".to_string()
         })?;
-    let runtime_name = read_mono_class_name(&reader, runtime_value_class);
     if debug {
         eprintln!(
-            "mono::read_mtga_card_database: dict=0x{:x} count={} value_class=0x{:x} ({:?})",
-            dict_addr, dict_count, runtime_value_class, runtime_name,
+            "mono::read_mtga_card_database: Entry[] run at 0x{:x} len={}",
+            first_entry_addr, run_len,
         );
     }
 
-    // If value class is CardPrintingData, try to resolve field offsets
-    // from its own metadata; fall back to hardcoded CPR offsets.
-    let offsets = resolve_card_field_offsets(&reader, runtime_value_class, cpr_class_hint)
-        .ok_or_else(|| {
-            "Could not resolve card field offsets on Mono runtime class.".to_string()
-        })?;
+    // Resolve field offsets for reading card data from each value object.
+    // On Mono, standalone objects have 16-byte headers (same as IL2CPP),
+    // so CardPrintingData field offsets should be identical. Use the
+    // hardcoded CPR offsets as fallback since we can't reliably walk
+    // Mono class metadata.
+    let offsets = resolve_card_field_offsets(&reader, 0, cpr_class_hint)
+        .unwrap_or_else(|| {
+            // Hardcoded from macOS IL2CPP verification (2026-04-11).
+            // CardPrintingData with embedded CardPrintingRecord at +0xC0.
+            // Record fields: GrpId@0x10, TitleId@0x20, Expansion@0x50, Collector@0x70
+            // Embedded offset = 0xC0 + (field - 0x10) = 0xC0+0, 0xC0+0x10, 0xC0+0x40, 0xC0+0x60
+            CardFieldOffsets {
+                grp_id: 0xC0,
+                title_id: 0xD0,
+                expansion_code: 0x100,
+                collector_number: 0x120,
+            }
+        });
     if debug {
         eprintln!(
             "mono::read_mtga_card_database: offsets grp_id=0x{:x} title_id=0x{:x} expansion=0x{:x} collector=0x{:x}",
@@ -1017,7 +1014,7 @@ pub fn read_mtga_card_database_mono(
         );
     }
 
-    let entries = read_card_printing_entries(&reader, dict_addr, runtime_value_class);
+    let entries = read_card_printing_entries(&reader, first_entry_addr);
     if entries.is_empty() {
         return Err("Found printing dict but walked zero valid entries.".to_string());
     }
