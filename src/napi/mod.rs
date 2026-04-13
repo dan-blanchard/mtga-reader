@@ -4720,9 +4720,11 @@ pub fn read_mtga_card_database_mono(process_name: String) -> serde_json::Value {
 }
 
 /// Mono-backend inventory reader.
+/// Pass known_gold and known_gems (visible in Arena's UI) for exact
+/// anchoring. Pass 0 for both to use the generic scanner (less reliable).
 #[napi]
-pub fn read_mtga_inventory_mono(process_name: String) -> serde_json::Value {
-    match crate::mono::scanner::read_mtga_inventory_mono(&process_name) {
+pub fn read_mtga_inventory_mono(process_name: String, known_gold: i32, known_gems: i32) -> serde_json::Value {
+    match crate::mono::scanner::read_mtga_inventory_mono(&process_name, known_gold, known_gems) {
         Ok((wc, wu, wr, wm, gold, gems, vault)) => {
             serde_json::json!({
                 "wcCommon": wc,
@@ -4734,6 +4736,17 @@ pub fn read_mtga_inventory_mono(process_name: String) -> serde_json::Value {
                 "vaultProgress": vault,
             })
         }
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Debug probe: search heap for two adjacent i32 values and dump context.
+/// Use to discover field offsets on Mono.
+/// Example: probeHeapForI32Pair("MTGA.exe", 1825, 610) finds gold+gems.
+#[napi]
+pub fn probe_heap_for_i32_pair(process_name: String, val_a: i32, val_b: i32) -> serde_json::Value {
+    match crate::mono::scanner::probe_heap_for_i32_pair(&process_name, val_a, val_b) {
+        Ok(result) => serde_json::json!({ "result": result }),
         Err(e) => serde_json::json!({ "error": e }),
     }
 }
