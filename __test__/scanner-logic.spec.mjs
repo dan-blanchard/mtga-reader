@@ -27,12 +27,6 @@ test("readMtgaInventory with nonexistent process returns error", (t) => {
   t.truthy(result.error, "Should return error for missing process");
 });
 
-test("readMtgaCardDatabase with nonexistent process returns error", (t) => {
-  if (!hasNapi) return t.pass("napi module not built");
-  const result = napi.readMtgaCardDatabase("nonexistent_process_99999");
-  t.truthy(result.error, "Should return error for missing process");
-});
-
 // --- Mono scanner error handling ---
 
 test("readMtgaCardsMono with nonexistent process returns error", (t) => {
@@ -44,12 +38,6 @@ test("readMtgaCardsMono with nonexistent process returns error", (t) => {
 test("readMtgaInventoryMono with nonexistent process returns error", (t) => {
   if (!hasNapi) return t.pass("napi module not built");
   const result = napi.readMtgaInventoryMono("nonexistent_process_99999", 0, 0);
-  t.truthy(result.error, "Should return error for missing process");
-});
-
-test("readMtgaCardDatabaseMono with nonexistent process returns error", (t) => {
-  if (!hasNapi) return t.pass("napi module not built");
-  const result = napi.readMtgaCardDatabaseMono("nonexistent_process_99999");
   t.truthy(result.error, "Should return error for missing process");
 });
 
@@ -92,17 +80,3 @@ test("readMtgaInventory returns object with expected fields or error", (t) => {
   }
 });
 
-test("readMtgaCardDatabase returns object with cards array or error", (t) => {
-  if (!hasNapi) return t.pass("napi module not built");
-  const result = napi.readMtgaCardDatabase("MTGA");
-  t.is(typeof result, "object");
-  if (result.cards) {
-    t.true(Array.isArray(result.cards));
-    for (const card of result.cards.slice(0, 5)) {
-      t.is(typeof card.grpId, "number");
-      t.is(typeof card.set, "string");
-      t.is(typeof card.collectorNumber, "string");
-      t.is(typeof card.titleId, "number");
-    }
-  }
-});
